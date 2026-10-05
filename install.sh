@@ -2,7 +2,7 @@
 #
 # wingsv-panel turnkey installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/WINGS-N/wingsv-panel/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/0x64656164/wingsv-panel/main/install.sh | bash
 #
 # Installs the panel as a standalone binary (default) or a container (--docker),
 # asks about certificates / port / an optional local vk-turn-proxy node / an
@@ -14,9 +14,9 @@ set -euo pipefail
 # --------------------------------------------------------------------------- #
 # Configurable knobs (env-overridable)
 # --------------------------------------------------------------------------- #
-PANEL_REPO="${PANEL_REPO:-WINGS-N/wingsv-panel}"
+PANEL_REPO="${PANEL_REPO:-0x64656164/wingsv-panel}"
 VKTP_REPO="${VKTP_REPO:-WINGS-N/vk-turn-proxy}"
-PANEL_IMAGE="${PANEL_IMAGE:-ghcr.io/wings-n/wingsv-panel:latest}"
+PANEL_IMAGE="${PANEL_IMAGE:-ghcr.io/0x64656164/wingsv-panel:latest}"
 
 BIN_DIR=/usr/local/bin
 PANEL_BIN="$BIN_DIR/wingsv-panel"
