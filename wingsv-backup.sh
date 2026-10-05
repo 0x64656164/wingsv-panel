@@ -87,27 +87,54 @@ ACME_H=""
 for h in "${ACME_HOME:-}" "$HOME/.acme.sh" /root/.acme.sh; do
   if [ -n "$h" ] && [ -d "$h" ]; then ACME_H="$h"; break; fi
 done
+is_program_dir() { case "$(basename "$1")" in dnsapi|deploy|notify|bin|ca) return 0;; esac; return 1; }
+
 if [ -n "$ACME_H" ]; then
-  # The certificate directory is named after the domain acme.sh was asked for,
-  # which is the PUBLIC_BASE_URL host: <domain> for RSA, <domain>_ecc for ECC.
-  HOST=$(cfg_get "$PANEL_CFG" PUBLIC_BASE_URL)
-  HOST=${HOST#*://}; HOST=${HOST%%/*}; HOST=${HOST%%:*}
+  TLS_C=$(cfg_get "$PANEL_CFG" TLS_CERT)
+  TLS_K=$(cfg_get "$PANEL_CFG" TLS_KEY)
   found=0
-  for d in "$ACME_H/$HOST" "$ACME_H/${HOST}_ecc"; do
-    [ -d "$d" ] && { add_path "$d"; found=1; }
+  # Exact match, no guessing: --install-cert records in each certificate's own
+  # .conf where it placed the files (Le_RealFullChainPath / Le_RealKeyPath), and
+  # the panel config points at that very path. Compare the substring so the
+  # quoting acme.sh happens to use does not matter.
+  for c in "$ACME_H"/*_ecc/*.conf "$ACME_H"/*/*.conf; do
+    [ -f "$c" ] || continue
+    d=$(dirname "$c")
+    is_program_dir "$d" && continue
+    if { [ -n "$TLS_C" ] && grep -qF "$TLS_C" "$c"; } \
+    || { [ -n "$TLS_K" ] && grep -qF "$TLS_K" "$c"; }; then
+      add_path "$d"; found=1
+    fi
   done
+  # No Le_Real*Path recorded: fall back to the domain in PUBLIC_BASE_URL, whose
+  # certificate directory acme.sh names <domain> (RSA) or <domain>_ecc (ECC).
   if [ "$found" = 0 ]; then
-    # Never drop the renewal state silently: if the domain does not line up
-    # (cert for another host, DNS challenge, acme.sh name escaping) take every
-    # certificate directory except the program's own subdirectories.
-    warn "no acme.sh certificate directory matched '$HOST' - archiving all of them"
+    HOST=$(cfg_get "$PANEL_CFG" PUBLIC_BASE_URL)
+    HOST=${HOST#*://}; HOST=${HOST%%/*}; HOST=${HOST%%:*}
+    for d in "$ACME_H/$HOST" "$ACME_H/${HOST}_ecc"; do
+      if [ -d "$d" ]; then add_path "$d"; found=1; fi
+    done
+  fi
+  # Still nothing: never drop the renewal state silently. If the certificate
+  # came from elsewhere (option 2) or acme.sh escaped the name, take every
+  # certificate directory rather than none of them.
+  if [ "$found" = 0 ]; then
+    warn "no acme.sh certificate directory matched - archiving all of them"
     for d in "$ACME_H"/*_ecc "$ACME_H"/*/; do
       [ -d "$d" ] || continue
-      case "$(basename "$d")" in dnsapi|deploy|notify|bin|ca) continue;; esac
+      is_program_dir "$d" && continue
       [ -f "$d"/*.key ] || continue   # a certificate dir has a private key
       add_path "$d"
     done
   fi
+  # The CA account is shared by every certificate acme.sh issues for this host;
+  # without it renewal re-registers and can hit Let's Encrypt's new-subscriber
+  # rate limit.
+  add_path "$ACME_H/ca"
+  add_path "$ACME_H/account.conf"
+  add_path "$ACME_H/acme.sh.env"
+fi
+
   # The CA account is shared by every certificate acme.sh issues for this host;
   # without it renewal re-registers and can hit Let's Encrypt's new-subscriber
   # rate limit.
