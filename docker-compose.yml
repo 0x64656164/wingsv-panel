@@ -1,6 +1,6 @@
 services:
   app:
-    image: ghcr.io/wings-n/wingsv-panel:latest
+    image: ghcr.io/0x64656164/wingsv-panel:latest
     build:
       context: .
       dockerfile: Dockerfile

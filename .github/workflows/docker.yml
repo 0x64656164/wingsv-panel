@@ -12,7 +12,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: wings-n/wingsv-panel
+  IMAGE_NAME: 0x64656164/wingsv-panel
 
 jobs:
   build:

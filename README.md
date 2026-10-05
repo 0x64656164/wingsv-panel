@@ -16,7 +16,7 @@ GitHub Actions при пуше тега `v*` собирает бинарники
 
 ```bash
 curl -L -o wingsv-panel \
-  https://github.com/WINGS-N/wingsv-panel/releases/latest/download/wingsv-panel-linux-amd64
+  https://github.com/0x64656164/wingsv-panel/releases/latest/download/wingsv-panel-linux-amd64
 chmod +x wingsv-panel
 ./wingsv-panel
 ```
@@ -56,7 +56,7 @@ go run ./cmd/server
 локальный 3x-ui для создания профилей.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/WINGS-N/wingsv-panel/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/0x64656164/wingsv-panel/main/install.sh | sudo bash
 # опции: --docker  --yes  --uninstall
 ```
 
@@ -74,14 +74,14 @@ docker compose up --build
 Публичный образ:
 
 ```
-ghcr.io/wings-n/wingsv-panel:latest
+ghcr.io/0x64656164/wingsv-panel:latest
 ```
 
 Обновление образа на промышленной среде:
 
 ```bash
-docker build -t ghcr.io/wings-n/wingsv-panel:latest .
-docker push ghcr.io/wings-n/wingsv-panel:latest
+docker build -t ghcr.io/0x64656164/wingsv-panel:latest .
+docker push ghcr.io/0x64656164/wingsv-panel:latest
 ```
 
 ## Запуск в Kubernetes
@@ -101,8 +101,8 @@ git checkout HEAD~1 -- k8s/       # вернуть в рабочее дерев�
 Обновление развёрнутого приложения:
 
 ```bash
-docker build -t ghcr.io/wings-n/wingsv-panel:latest .
-docker push ghcr.io/wings-n/wingsv-panel:latest
+docker build -t ghcr.io/0x64656164/wingsv-panel:latest .
+docker push ghcr.io/0x64656164/wingsv-panel:latest
 kubectl -n v-wingsnet rollout restart deploy/app
 ```
 

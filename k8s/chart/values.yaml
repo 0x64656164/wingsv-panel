@@ -13,7 +13,7 @@ namespace: wingsvpn
 nameOverride: panel
 
 image:
-  repository: ghcr.io/wings-n/wingsv-panel
+  repository: ghcr.io/0x64656164/wingsv-panel
   tag: latest
   pullPolicy: Always
 
