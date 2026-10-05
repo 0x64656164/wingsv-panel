@@ -3,8 +3,9 @@
 #
 #   sudo bash wingsv-backup.sh [output.tar.gz]
 #
-# Covers every path install.sh owns: /etc/wings (config, certs, wg key),
-# /var/lib/wings (SQLite database), the systemd units and root's acme.sh state.
+# The path list is discovered, not guessed: every path either config names or
+# acme.sh keeps is picked up, so a certificate outside /etc/wings (install.sh
+# option 2 lets you point TLS_CERT/TLS_KEY anywhere) still gets archived.
 # Services are stopped first so SQLite and the config are flushed, and they are
 # always restarted - even when archiving fails.
 
@@ -14,35 +15,80 @@ PANEL_SVC=wingsv-panel
 VKTP_SVC=wings-vktp
 SVC_USER=wings
 PANEL_CFG=/etc/wings/panel/config.toml
+VKTP_CFG=/etc/wings/vktp/config.toml
 OUT="${1:-/root/wingsv-backup-$(date +%Y%m%d-%H%M%S).tar.gz}"
 
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 [ -f "$PANEL_CFG" ] || { echo "no $PANEL_CFG - is this a panel host?" >&2; exit 1; }
 command -v tar >/dev/null 2>&1 || { echo "tar is required" >&2; exit 1; }
 
+warn() { printf '==> warn %s\n' "$*" >&2; }
+
 # Same parser install.sh uses for its own config keys.
-cfg_get() {
-  sed -n "s/^$1[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}.*/\1/p" "$PANEL_CFG" 2>/dev/null | head -1
+cfg_get() { # cfg_get <file> <key>
+  [ -n "${2:-}" ] || return 0
+  sed -n "s/^$2[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"]*\)\"\{0,1\}.*/\1/p" "$1" 2>/dev/null | head -1
 }
 
-# With --advanced the database may sit outside /var/lib/wings; ask the config
-# instead of assuming the default location.
-DB_PATH=$(cfg_get DB_PATH)
+# The database is needed explicitly: it is verified before and after archiving.
+DB_PATH=$(cfg_get "$PANEL_CFG" DB_PATH)
 [ -n "$DB_PATH" ] || DB_PATH=/var/lib/wings/panel/v-wingsnet.db
-DB_DIR=$(dirname "$DB_PATH")
 
 # Paths are archived relative to / so tar does not warn about leading slashes
 # and the archive extracts with a plain `tar -xzf ... -C /`.
-PATHS=(etc/wings var/lib/wings)
-add_path() { # add_path <absolute path> - appended as-is, never its parent
-  [ -e "$1" ] || return 0
-  local rel=${1#/}
-  case " ${PATHS[*]} " in *" $rel "*) ;; *) PATHS+=("$rel") ;; esac
+PATHS=()
+MISSING=()
+covered() { # covered <rel> - true when an already-added directory contains it
+  local c
+  for c in ${PATHS[@]+"${PATHS[@]}"}; do
+    case "$1/" in "$c"/*) return 0;; esac
+  done
+  return 1
 }
-# Only the database's own directory - not dirname of every extra path: acme.sh
-# lives in /root, and archiving /root would swallow the archive being written.
-add_path "$DB_DIR"
-add_path "$HOME/.acme.sh"
+push() { # push <absolute path>
+  local rel=${1#/}
+  # Already inside an archived directory: adding it again would store it twice.
+  if covered "$rel"; then return 0; fi
+  PATHS+=("$rel")
+}
+usable() { # usable <absolute path> - reject relative paths and self-inclusion
+  case "$1" in
+    /*) ;;
+    *) warn "config names a non-absolute path, skipped: '$1'"; return 1;;
+  esac
+  # Never archive a directory that contains the archive being written: that is
+  # what makes tar abort with "file changed as we read it".
+  case "$OUT/" in "$1"/*) warn "skipped $1 - it contains the output archive"; return 1;; esac
+  return 0
+}
+add_path() { # config-named path: absent is tolerated, but reported
+  usable "$1" || return 0
+  if [ ! -e "$1" ]; then MISSING+=("$1"); return 0; fi
+  push "$1"
+}
+add_base() { # path the install cannot run without: absent is fatal
+  [ -e "$1" ] || { echo "ERROR: $1 is missing - nothing to back up" >&2; exit 1; }
+  usable "$1" || return 0
+  push "$1"
+}
+
+add_base /etc/wings
+add_base /var/lib/wings
+add_path "$(dirname "$DB_PATH")"   # custom DB_PATH from --advanced
+add_path "$(cfg_get "$PANEL_CFG" CA_DIR)"        # /etc/wings/panel/certs
+add_path "$(cfg_get "$PANEL_CFG" TLS_CERT)"      # may live outside /etc/wings
+add_path "$(cfg_get "$PANEL_CFG" TLS_KEY)"
+add_path "$(cfg_get "$VKTP_CFG" wg-key-file)"    # WireGuard private key
+# acme.sh keeps the account and renewal state; without it the restored panel
+# cannot renew its certificate. ACME_HOME wins if the operator set one.
+for h in "${ACME_HOME:-}" "$HOME/.acme.sh" /root/.acme.sh; do
+  [ -n "$h" ] && add_path "$h"
+done
+
+# A path the config points at but that is gone is worth shouting about: the
+# restore would then come up without the file the panel insists on.
+for m in ${MISSING[@]+"${MISSING[@]}"}; do warn "config points at a missing path: $m"; done
+echo "==> archiving: ${PATHS[*]}"
 
 # Units only exist for the binary install; a docker host has no unit file.
 UNITS=()
@@ -105,6 +151,12 @@ for required in "etc/wings/panel/config.toml" "${DB_PATH#/}"; do
     exit 1
   fi
 done
+
+# Record what went in, so the restore can stash exactly these paths before
+# overwriting them. Archives made before this sidecar existed fall back to a
+# fixed list in wingsv-restore.sh.
+printf '%s\n' "${PATHS[@]}" > "$OUT.paths"
+chmod 600 "$OUT.paths"
 
 echo "==> ok: $OUT ($(du -h "$OUT" | cut -f1))"
 ARCHIVE_OK=1

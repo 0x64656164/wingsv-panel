@@ -60,10 +60,21 @@ if command -v docker >/dev/null 2>&1; then
 fi
 
 # Keep the previous state instead of deleting it, so a bad archive can be undone
-# by unpacking it back over these directories.
+# by unpacking it back over these directories. The list comes from the backup's
+# sidecar manifest, which records the paths discovery actually archived; without
+# it (older archive) fall back to the paths install.sh owns by default.
+STASH_DIRS=(etc/wings var/lib/wings root/.acme.sh)
+if [ -f "$ARCHIVE.paths" ]; then
+  STASH_DIRS=()
+  while IFS= read -r d; do
+    case "$d" in /*|""|"."|"..") continue;; esac
+    STASH_DIRS+=("$d")
+  done < "$ARCHIVE.paths"
+fi
+
 STASH="/root/wingsv-pre-restore-$(date +%Y%m%d-%H%M%S)"
 echo "==> moving current state to $STASH"
-for d in etc/wings var/lib/wings root/.acme.sh; do
+for d in "${STASH_DIRS[@]}"; do
   if [ -e "/$d" ]; then
     mkdir -p "$STASH/$(dirname "$d")"
     mv "/$d" "$STASH/$d"
