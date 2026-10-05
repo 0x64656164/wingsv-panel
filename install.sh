@@ -340,6 +340,15 @@ arch_tag() {
   esac
 }
 
+# The panel release assets are named straight from GOARCH plus the GOARM
+# revision (release.yml), so 32-bit ARM ships as "armv7" - while the
+# vk-turn-proxy releases call that very platform "arm". arch_tag has to keep
+# saying "arm" for the node, so the panel gets its own name instead.
+panel_asset_arch() {
+  local tag; tag=$(arch_tag)
+  if [ "$tag" = arm ]; then echo armv7; else echo "$tag"; fi
+}
+
 download() { # download <repo> <asset> <out>
   local repo="$1" asset="$2" out="$3"
   local url="https://github.com/$repo/releases/latest/download/$asset"
@@ -457,7 +466,7 @@ update_panel() {
   PANEL_DB=$(cfg_get DB_PATH "$PANEL_CFG"); [ -n "$PANEL_DB" ] && PANEL_DATA_DIR=$(dirname "$PANEL_DB")
   grep -q '^TLS_SELF_SIGNED' "$PANEL_CFG" 2>/dev/null && TLS_SELF_SIGNED=true
   systemctl stop "$PANEL_SVC" 2>/dev/null || true
-  if [ "$MODE" = bin ]; then download "$PANEL_REPO" "wingsv-panel-linux-$(arch_tag)" "$PANEL_BIN"; fi
+  if [ "$MODE" = bin ]; then download "$PANEL_REPO" "wingsv-panel-linux-$(panel_asset_arch)" "$PANEL_BIN"; fi
   ensure_user
   chown -R "$SVC_USER":"$SVC_USER" "$PANEL_CFG_DIR" "$PANEL_DATA_DIR" 2>/dev/null || true
   if [ "$MODE" = docker ]; then start_panel_docker; else start_panel_bin; fi
@@ -499,7 +508,7 @@ install_panel() {
   if systemctl is-active --quiet "$PANEL_SVC" 2>/dev/null; then log "$(t log_reinstall)"; fi
   systemctl stop "$PANEL_SVC" 2>/dev/null || true
 
-  if [ "$MODE" = bin ]; then download "$PANEL_REPO" "wingsv-panel-linux-$(arch_tag)" "$PANEL_BIN"; fi
+  if [ "$MODE" = bin ]; then download "$PANEL_REPO" "wingsv-panel-linux-$(panel_asset_arch)" "$PANEL_BIN"; fi
 
   write_panel_config
   ensure_user
