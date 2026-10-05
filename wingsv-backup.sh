@@ -135,14 +135,6 @@ if [ -n "$ACME_H" ]; then
   add_path "$ACME_H/acme.sh.env"
 fi
 
-  # The CA account is shared by every certificate acme.sh issues for this host;
-  # without it renewal re-registers and can hit Let's Encrypt's new-subscriber
-  # rate limit.
-  add_path "$ACME_H/ca"
-  add_path "$ACME_H/account.conf"
-  add_path "$ACME_H/acme.sh.env"
-fi
-
 # A path the config points at but that is gone is worth shouting about: the
 # restore would then come up without the file the panel insists on.
 for m in ${MISSING[@]+"${MISSING[@]}"}; do warn "config points at a missing path: $m"; done
