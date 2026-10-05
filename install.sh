@@ -450,6 +450,10 @@ install_acme() { # install_acme <domain>
 update_panel() {
   PUBLIC_BASE_URL=$(cfg_get PUBLIC_BASE_URL "$PANEL_CFG")
   PANEL_PORT=$(cfg_get LISTEN_ADDR "$PANEL_CFG" | tr -d ':')
+  # The docker port mapping is built from $PROV_PORT, not from the config, so a
+  # non-default provisioning port must be re-read here or the update publishes
+  # the wrong port and node->panel provisioning dies.
+  PROV_PORT=$(cfg_get PROVISIONING_LISTEN "$PANEL_CFG" | tr -d ':'); [ -n "$PROV_PORT" ] || PROV_PORT=9091
   PANEL_DB=$(cfg_get DB_PATH "$PANEL_CFG"); [ -n "$PANEL_DB" ] && PANEL_DATA_DIR=$(dirname "$PANEL_DB")
   grep -q '^TLS_SELF_SIGNED' "$PANEL_CFG" 2>/dev/null && TLS_SELF_SIGNED=true
   systemctl stop "$PANEL_SVC" 2>/dev/null || true
@@ -598,9 +602,14 @@ detect_xui() { systemctl status x-ui >/dev/null 2>&1 || [ -f /etc/x-ui/x-ui.db ]
 wire_xui() {
   detect_xui || { log "$(t log_no_xui)"; return; }
   yesno "$(t q_wire_xui)" y || return
-  local token; token=$(gen_token)
-  XUI_NODE_ID=$(panel_cli node add --kind xui --name "local-3x-ui" --grpc-endpoint "127.0.0.1:$XUI_GRPC_PORT" --grpc-token "$token" | jq -r .node_id)
+  # node add is idempotent by (kind,name): on a re-run it returns the existing
+  # node, so read back the token the panel actually stores. Generating a fresh
+  # one here would push a token the panel does not know and cut 3x-ui off.
+  local out token
+  out=$(panel_cli node add --kind xui --name "local-3x-ui" --grpc-endpoint "127.0.0.1:$XUI_GRPC_PORT")
+  XUI_NODE_ID=$(echo "$out" | jq -r .node_id); token=$(echo "$out" | jq -r .grpc_token)
   [ -n "$XUI_NODE_ID" ] && [ "$XUI_NODE_ID" != null ] || die "$(t err_xui_reg)"
+  [ -n "$token" ] && [ "$token" != null ] || die "$(t err_xui_reg)"
   # enable the 3x-ui management gRPC + register the token, then restart it
   local panel_grpc; panel_grpc="127.0.0.1:$PROV_PORT"
   if have x-ui; then
