@@ -14,7 +14,10 @@ set -euo pipefail
 PANEL_SVC=wingsv-panel
 VKTP_SVC=wings-vktp
 SVC_USER=wings
-INSTALLER_URL=https://raw.githubusercontent.com/WINGS-N/wingsv-panel/main/install.sh
+# Fetch the installer from the fork these scripts ship with, not from upstream:
+# otherwise a restore would re-run an installer whose update path does not match
+# this script. Overridable for anyone vendoring the script elsewhere.
+INSTALLER_URL="${INSTALLER_URL:-https://raw.githubusercontent.com/0x64656164/wingsv-panel/main/install.sh}"
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 
 # systemd/binary is the installer's own default, so the restore defaults to it
