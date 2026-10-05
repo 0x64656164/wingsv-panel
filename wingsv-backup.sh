@@ -38,6 +38,7 @@ DB_PATH=$(cfg_get "$PANEL_CFG" DB_PATH)
 # and the archive extracts with a plain `tar -xzf ... -C /`.
 PATHS=()
 MISSING=()
+SHARED=()   # acme.sh state other services on this host also write to
 covered() { # covered <rel> - true when an already-added directory contains it
   local c
   for c in ${PATHS[@]+"${PATHS[@]}"}; do
@@ -64,6 +65,13 @@ usable() { # usable <absolute path> - reject relative paths and self-inclusion
 add_path() { # config-named path: absent is tolerated, but reported
   usable "$1" || return 0
   if [ ! -e "$1" ]; then MISSING+=("$1"); return 0; fi
+  push "$1"
+}
+add_shared() { # archived, but flagged: restore must not clobber a live copy
+  usable "$1" || return 0
+  if [ ! -e "$1" ]; then MISSING+=("$1"); return 0; fi
+  local rel=${1#/}
+  case " ${SHARED[*]} " in *" $rel "*) ;; *) SHARED+=("$rel") ;; esac
   push "$1"
 }
 add_base() { # path the install cannot run without: absent is fatal
@@ -129,10 +137,11 @@ if [ -n "$ACME_H" ]; then
   fi
   # The CA account is shared by every certificate acme.sh issues for this host;
   # without it renewal re-registers and can hit Let's Encrypt's new-subscriber
-  # rate limit.
-  add_path "$ACME_H/ca"
-  add_path "$ACME_H/account.conf"
-  add_path "$ACME_H/acme.sh.env"
+  # rate limit. Other services on this host write to the same files, so they are
+  # flagged as shared and a restore will not overwrite a live copy.
+  add_shared "$ACME_H/ca"
+  add_shared "$ACME_H/account.conf"
+  add_shared "$ACME_H/acme.sh.env"
 fi
 
 # A path the config points at but that is gone is worth shouting about: the
@@ -202,10 +211,18 @@ for required in "etc/wings/panel/config.toml" "${DB_PATH#/}"; do
   fi
 done
 
-# Record what went in, so the restore can stash exactly these paths before
-# overwriting them. Archives made before this sidecar existed fall back to a
-# fixed list in wingsv-restore.sh.
-printf '%s\n' "${PATHS[@]}" > "$OUT.paths"
+# Record what went in, and whether the restore may overwrite it. The manifest
+# carries a tab-separated kind per path: "shared" entries are acme.sh state that
+# other services on this host also write to, and wingsv-restore.sh keeps a live
+# copy of those instead of rolling it back to the archived one.
+{
+  for p in ${PATHS[@]+"${PATHS[@]}"}; do
+    case " ${SHARED[*]} " in
+      *" $p "*) printf 'shared\t%s\n' "$p";;
+      *)        printf 'owned\t%s\n' "$p";;
+    esac
+  done
+} > "$OUT.paths"
 chmod 600 "$OUT.paths"
 
 echo "==> ok: $OUT ($(du -h "$OUT" | cut -f1))"

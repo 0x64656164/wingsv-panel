@@ -61,16 +61,29 @@ fi
 
 # Keep the previous state instead of deleting it, so a bad archive can be undone
 # by unpacking it back over these directories. The list comes from the backup's
-# sidecar manifest, which records the paths discovery actually archived; without
-# it (older archive) fall back to the paths install.sh owns by default.
-STASH_DIRS=(etc/wings var/lib/wings root/.acme.sh)
+# sidecar manifest, which records the paths discovery actually archived.
+#
+# "shared" entries are acme.sh state that every other service on this host also
+# writes to (the CA account, account.conf, acme.sh.env). If anything touched them
+# between the backup and now, rolling them back would undo that - and would pull
+# the rug out from under a sibling service. So a live copy always wins there, and
+# the archived one stays in $STASH to be merged by hand if it is really wanted.
+OWNED=(); SHARED=()
 if [ -f "$ARCHIVE.paths" ]; then
-  STASH_DIRS=()
-  while IFS= read -r d; do
-    case "$d" in /*|""|"."|"..") continue;; esac
-    STASH_DIRS+=("$d")
+  while IFS=$'\t' read -r kind p; do
+    case "$p" in /*|""|"."|"..") continue;; esac
+    case "$kind" in
+      shared) SHARED+=("$p");;
+      *)      OWNED+=("$p");;
+    esac
   done < "$ARCHIVE.paths"
+else
+  # Archive predates the manifest: assume the acme.sh tree is shared, since that
+  # is the dangerous direction to get wrong.
+  OWNED=(etc/wings var/lib/wings)
+  SHARED=(root/.acme.sh)
 fi
+STASH_DIRS=("${OWNED[@]}" ${SHARED[@]+"${SHARED[@]}"})
 
 STASH="/root/wingsv-pre-restore-$(date +%Y%m%d-%H%M%S)"
 echo "==> moving current state to $STASH"
@@ -89,6 +102,22 @@ done
 
 echo "==> extracting"
 tar -xzf "$ARCHIVE" -C /
+
+# Undo the extraction for shared acme.sh state that the host has moved on from.
+# Done after extraction because that is the only way to see both versions.
+if [ -d "$STASH" ]; then
+  for d in ${SHARED[@]+"${SHARED[@]}"}; do
+    [ -e "$STASH/$d" ] || continue        # nothing was there before: keep the archive's
+    [ -e "/$d" ] || continue
+    if command -v diff >/dev/null 2>&1 && diff -qr "$STASH/$d" "/$d" >/dev/null 2>&1; then
+      continue                            # identical, nothing to decide
+    fi
+    rm -rf "/$d"
+    mkdir -p "$(dirname "/$d")"
+    mv "$STASH/$d" "/$d"
+    echo "==> kept the live $d; the archived copy differs and is in $STASH" >&2
+  done
+fi
 
 if id "$SVC_USER" >/dev/null 2>&1; then
   echo "==> user $SVC_USER exists"
