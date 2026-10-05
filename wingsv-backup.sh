@@ -29,15 +29,20 @@ cfg_get() {
 # instead of assuming the default location.
 DB_PATH=$(cfg_get DB_PATH)
 [ -n "$DB_PATH" ] || DB_PATH=/var/lib/wings/panel/v-wingsnet.db
+DB_DIR=$(dirname "$DB_PATH")
 
 # Paths are archived relative to / so tar does not warn about leading slashes
 # and the archive extracts with a plain `tar -xzf ... -C /`.
 PATHS=(etc/wings var/lib/wings)
-for p in "$DB_PATH" "$HOME/.acme.sh"; do
-  [ -e "$p" ] || continue
-  d=$(dirname "$p"); d=${d#/}
-  case " ${PATHS[*]} " in *" $d "*) ;; *) PATHS+=("$d") ;; esac
-done
+add_path() { # add_path <absolute path> - appended as-is, never its parent
+  [ -e "$1" ] || return 0
+  local rel=${1#/}
+  case " ${PATHS[*]} " in *" $rel "*) ;; *) PATHS+=("$rel") ;; esac
+}
+# Only the database's own directory - not dirname of every extra path: acme.sh
+# lives in /root, and archiving /root would swallow the archive being written.
+add_path "$DB_DIR"
+add_path "$HOME/.acme.sh"
 
 # Units only exist for the binary install; a docker host has no unit file.
 UNITS=()
@@ -62,7 +67,16 @@ restore_services() {
   fi
 }
 # A failed backup must not leave the panel down, so always resume on the way out.
-trap restore_services EXIT
+# It must also not leave a truncated archive that looks like a usable one.
+ARCHIVE_OK=0
+cleanup() {
+  if [ "$ARCHIVE_OK" != 1 ] && [ -f "$OUT" ]; then
+    rm -f "$OUT"
+    echo "ERROR: backup failed - partial archive removed, nothing to restore from" >&2
+  fi
+  restore_services
+}
+trap cleanup EXIT
 
 if command -v sqlite3 >/dev/null 2>&1 && [ -f "$DB_PATH" ]; then
   if [ "$(sqlite3 "$DB_PATH" 'PRAGMA integrity_check;' 2>/dev/null || true)" != ok ]; then
@@ -93,3 +107,4 @@ for required in "etc/wings/panel/config.toml" "${DB_PATH#/}"; do
 done
 
 echo "==> ok: $OUT ($(du -h "$OUT" | cut -f1))"
+ARCHIVE_OK=1
