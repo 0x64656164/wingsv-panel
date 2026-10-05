@@ -1100,19 +1100,19 @@ async function loadDetail() {
       syncModeDraft.value = detail.value.client.sync_mode || 'always';
       syncIntervalDraft.value = detail.value.client.periodic_interval_minutes || 30;
     }
-    // Default to the actual current state when the detail page opens — admins
-    // overwhelmingly want to see "what does the device have right now" rather
-    // than "what did I last push", and the client never streams its desired
-    // state back. While followClient is on we keep mirroring it.
+    // The draft is the BASE of the patch (savePatch diffs it against
+    // desired_config), so it must always hold desired_config and nothing else.
+    // Seeding it from reported_config instead made the very first push carry
+    // every field the device disagrees on - overwriting panel state the admin
+    // never touched, and for a managed client that mismatch always includes
+    // turn.profiles, whose presence makes the device skip the flat fields.
+    // Pulling device state in is a deliberate action: "Load from client".
     //
     // Crucially, when followClient is OFF (the admin is editing) we must NOT
     // touch configDraft on every incoming state_report refresh - that would
     // clobber the in-progress draft. Seed the editing buffer from desired only
     // on the first load; afterwards leave the admin's draft alone.
-    if (followClient.value && detail.value.reported_config) {
-      configDraft.value = formatJson(detail.value.reported_config);
-      configDraftSeeded.value = true;
-    } else if (!configDraftSeeded.value) {
+    if (followClient.value || !configDraftSeeded.value) {
       configDraft.value = formatJson(detail.value.desired_config) || '{}';
       configDraftSeeded.value = true;
     }
@@ -1274,8 +1274,8 @@ async function loadVkTurnNodes() {
 
 function setFollowClient(value) {
   followClient.value = value;
-  if (value && detail.value?.reported_config) {
-    configDraft.value = formatJson(detail.value.reported_config);
+  if (value) {
+    configDraft.value = formatJson(detail.value?.desired_config) || '{}';
   }
 }
 
@@ -1319,9 +1319,9 @@ function onFormChanged(next) {
 // Stop following the moment the admin types into the JSON area — we don't
 // want the next live update to wipe their in-progress edit.
 watch(configDraft, () => {
-  if (configMode.value === 'json' && followClient.value && detail.value?.reported_config) {
-    const reported = formatJson(detail.value.reported_config);
-    if (configDraft.value !== reported) {
+  if (configMode.value === 'json' && followClient.value) {
+    const desired = formatJson(detail.value?.desired_config) || '{}';
+    if (configDraft.value !== desired) {
       followClient.value = false;
     }
   }
@@ -1948,6 +1948,9 @@ function loadFromReported() {
   // The copy is instant; flash a short busy state so the click is visibly
   // acknowledged and it's clear the draft was replaced.
   busyLoadReported.value = true;
+  // Pulling device state in is an explicit copy - the next refresh must not
+  // silently overwrite what the admin just took.
+  followClient.value = false;
   configDraft.value = formatJson(detail.value.reported_config);
   configError.value = '';
   setTimeout(() => {
