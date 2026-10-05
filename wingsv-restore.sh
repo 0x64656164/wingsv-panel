@@ -103,19 +103,54 @@ done
 echo "==> extracting"
 tar -xzf "$ARCHIVE" -C /
 
-# Undo the extraction for shared acme.sh state that the host has moved on from.
-# Done after extraction because that is the only way to see both versions.
+# acme.sh state is shared with every other service on this host, so the archived
+# copy must not replace it wholesale: that would roll back a sibling service's
+# registration or a newer Le_Webroot. Instead the live copy stays the base and
+# only what it is missing gets filled in from the archive.
+merge_key_file() { # merge_key_file <archived> <live>
+  local a=$1 l=$2 line k
+  [ -f "$a" ] || return 0
+  if [ ! -f "$l" ]; then
+    cp -p "$a" "$l"; echo "    + ${l##*/} was missing, took the archived one"; return 0
+  fi
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue;; esac
+    k=${line%%=*}
+    k=${k//[[:space:]]/}
+    [ -n "$k" ] || continue
+    # Only keys the live file never defines. A key it does define keeps its live
+    # value: acme.sh lets the last assignment win, so appending the archived
+    # line would quietly roll the setting back - the very thing to avoid.
+    if ! grep -q "^[[:space:]]*$k[[:space:]]*=" "$l"; then
+      printf '%s\n' "$line" >> "$l"
+      echo "    + $k restored into ${l##*/}"
+    fi
+  done < "$a"
+}
+merge_tree() { # merge_tree <archived dir> <live dir>
+  local a=$1 l=$2 f
+  [ -d "$a" ] || return 0
+  if [ ! -d "$l" ]; then
+    mkdir -p "$(dirname "$l")"; cp -a "$a" "$l"
+    echo "    + ${l##*/} was missing, took the archived one"; return 0
+  fi
+  while IFS= read -r f; do
+    # Presence only: a file that exists live is never overwritten.
+    [ -e "$l/$f" ] && continue
+    mkdir -p "$(dirname "$l/$f")"
+    cp -p "$a/$f" "$l/$f"
+    echo "    + ${f#./} restored into ${l##*/}"
+  done < <(cd "$a" && find . -type f)
+}
 if [ -d "$STASH" ]; then
   for d in ${SHARED[@]+"${SHARED[@]}"}; do
-    [ -e "$STASH/$d" ] || continue        # nothing was there before: keep the archive's
-    [ -e "/$d" ] || continue
-    if command -v diff >/dev/null 2>&1 && diff -qr "$STASH/$d" "/$d" >/dev/null 2>&1; then
-      continue                            # identical, nothing to decide
-    fi
+    # Nothing was on the host before: the freshly extracted copy already stands.
+    [ -e "$STASH/$d" ] || continue
+    echo "==> merging shared $d"
+    if [ -d "/$d" ]; then merge_tree "/$d" "$STASH/$d"; else merge_key_file "/$d" "$STASH/$d"; fi
     rm -rf "/$d"
     mkdir -p "$(dirname "/$d")"
     mv "$STASH/$d" "/$d"
-    echo "==> kept the live $d; the archived copy differs and is in $STASH" >&2
   done
 fi
 
