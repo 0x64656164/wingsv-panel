@@ -39,6 +39,10 @@ var (
 	}
 )
 
+// configSchemaVer - версия формата конфига, которую панель умеет писать и
+// читать. Должна совпадать с CURRENT_VERSION в приложении.
+const configSchemaVer = 1
+
 func protoToJSON(message proto.Message) (json.RawMessage, error) {
 	if message == nil {
 		return json.RawMessage("null"), nil
@@ -421,7 +425,7 @@ func (h *Handler) handleCreateClient(w http.ResponseWriter, r *http.Request, adm
 		return
 	}
 	if seedConfig == nil {
-		seedConfig = &wingsvpb.Config{Ver: 1}
+		seedConfig = &wingsvpb.Config{Ver: configSchemaVer}
 	}
 
 	vkTurnEndpoint, err := h.resolveVkTurnEndpoint(admin, req.VkTurnNodeID)
@@ -533,7 +537,7 @@ func (h *Handler) buildClientLink(
 	remoteControl bool,
 	vkTurnEndpoint string,
 ) (string, error) {
-	cfg := &wingsvpb.Config{Ver: 1}
+	cfg := &wingsvpb.Config{Ver: configSchemaVer}
 	if remoteControl {
 		// Под полным контролем в ссылке остаётся только дверь: профиль, ссылки
 		// и остальное приезжают по gRPC сразу после подключения. Класть их ещё
@@ -1193,7 +1197,7 @@ func (h *Handler) respondPatchClientConfig(
 		return
 	}
 
-	stored := &wingsvpb.Config{Ver: 1}
+	stored := &wingsvpb.Config{Ver: configSchemaVer}
 	var storedVersion int64
 	var touched map[string]int64
 	if current, err := h.store.GetClientConfig(client.ID); err == nil {
@@ -1239,6 +1243,12 @@ func (h *Handler) respondPatchClientConfig(
 
 	// Устройству едет патч, а не вся картина: остальное у него уже есть
 	patch.ConfigVersion = version
+	// Служебную шапку берём из merged, а не из патча: configpatch считает type
+	// и ver служебными и в патч они не попадают, поэтому патч уезжает с
+	// type=0 и ver=0. Устройство по type решает, какие разделы читать, и по
+	// нему же отличает панельный конфиг от share-ссылки одного профиля.
+	patch.Ver = merged.GetVer()
+	patch.Type = merged.GetType()
 	h.hub.SendToClient(client.ID, &guardianpb.Frame{
 		Payload: &guardianpb.Frame_ConfigPush{
 			ConfigPush: &guardianpb.ConfigPush{Config: patch, Revision: revision},
@@ -1275,6 +1285,12 @@ func (h *Handler) respondPushClientConfig(w http.ResponseWriter, r *http.Request
 	parsed.Guardian = nil
 	if !client.HasRootAccess {
 		stripRootOnlyBlocks(parsed)
+	}
+	// Полный конфиг может прийти из JSON-редактора без ver. Устройство читает
+	// его как «версия формата неизвестна» и не доверяет разделам, поэтому
+	// закрепляем текущую версию схемы и в хранилище, и в том, что уедет.
+	if parsed.Ver == 0 {
+		parsed.Ver = configSchemaVer
 	}
 	if req.Provision != nil {
 		if err := h.applyProvisionToConfig(admin, client, parsed, *req.Provision, req.VkTurnNodeID); err != nil {
