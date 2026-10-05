@@ -17,7 +17,9 @@ SVC_USER=wings
 INSTALLER_URL=https://raw.githubusercontent.com/WINGS-N/wingsv-panel/main/install.sh
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 
-MODE=""
+# systemd/binary is the installer's own default, so the restore defaults to it
+# too and only touches Docker when explicitly asked.
+MODE=bin
 ARCHIVE=""
 for arg in "$@"; do
   case "$arg" in
@@ -40,14 +42,10 @@ printf '%s\n' "$LIST" | grep -qx "etc/wings/panel/config.toml" \
   || { echo "ERROR: archive has no panel config" >&2; exit 1; }
 DB_REL=$(printf '%s\n' "$LIST" | grep 'var/lib/wings.*\.db$' | head -1 || true)
 
-# A docker install writes no systemd unit, so its absence identifies the mode.
-# An explicit --docker/--bin always wins over detection.
-if [ -z "$MODE" ]; then
-  if printf '%s\n' "$LIST" | grep -qx "etc/systemd/system/$PANEL_SVC.service"; then
-    MODE=bin
-  else
-    MODE=docker
-  fi
+# A docker install writes no systemd unit, but never infer docker from that: a
+# missing unit must not silently drag a systemd host into a containerised panel.
+if [ "$MODE" = bin ] && ! printf '%s\n' "$LIST" | grep -qx "etc/systemd/system/$PANEL_SVC.service"; then
+  echo "note: archive has no $PANEL_SVC.service unit, installing as a systemd service anyway"
 fi
 echo "==> mode: $MODE${DB_REL:+ (database: $DB_REL)}"
 
