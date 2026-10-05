@@ -79,11 +79,42 @@ add_path "$(cfg_get "$PANEL_CFG" CA_DIR)"        # /etc/wings/panel/certs
 add_path "$(cfg_get "$PANEL_CFG" TLS_CERT)"      # may live outside /etc/wings
 add_path "$(cfg_get "$PANEL_CFG" TLS_KEY)"
 add_path "$(cfg_get "$VKTP_CFG" wg-key-file)"    # WireGuard private key
-# acme.sh keeps the account and renewal state; without it the restored panel
-# cannot renew its certificate. ACME_HOME wins if the operator set one.
+
+# acme.sh: keep its STATE, not its distribution. dnsapi/, deploy/ and notify/
+# are ~300 re-downloadable files; renewal only needs the account key and this
+# host's own certificate directory.
+ACME_H=""
 for h in "${ACME_HOME:-}" "$HOME/.acme.sh" /root/.acme.sh; do
-  [ -n "$h" ] && add_path "$h"
+  if [ -n "$h" ] && [ -d "$h" ]; then ACME_H="$h"; break; fi
 done
+if [ -n "$ACME_H" ]; then
+  # The certificate directory is named after the domain acme.sh was asked for,
+  # which is the PUBLIC_BASE_URL host: <domain> for RSA, <domain>_ecc for ECC.
+  HOST=$(cfg_get "$PANEL_CFG" PUBLIC_BASE_URL)
+  HOST=${HOST#*://}; HOST=${HOST%%/*}; HOST=${HOST%%:*}
+  found=0
+  for d in "$ACME_H/$HOST" "$ACME_H/${HOST}_ecc"; do
+    [ -d "$d" ] && { add_path "$d"; found=1; }
+  done
+  if [ "$found" = 0 ]; then
+    # Never drop the renewal state silently: if the domain does not line up
+    # (cert for another host, DNS challenge, acme.sh name escaping) take every
+    # certificate directory except the program's own subdirectories.
+    warn "no acme.sh certificate directory matched '$HOST' - archiving all of them"
+    for d in "$ACME_H"/*_ecc "$ACME_H"/*/; do
+      [ -d "$d" ] || continue
+      case "$(basename "$d")" in dnsapi|deploy|notify|bin|ca) continue;; esac
+      [ -f "$d"/*.key ] || continue   # a certificate dir has a private key
+      add_path "$d"
+    done
+  fi
+  # The CA account is shared by every certificate acme.sh issues for this host;
+  # without it renewal re-registers and can hit Let's Encrypt's new-subscriber
+  # rate limit.
+  add_path "$ACME_H/ca"
+  add_path "$ACME_H/account.conf"
+  add_path "$ACME_H/acme.sh.env"
+fi
 
 # A path the config points at but that is gone is worth shouting about: the
 # restore would then come up without the file the panel insists on.
