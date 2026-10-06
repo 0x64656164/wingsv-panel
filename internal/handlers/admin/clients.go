@@ -438,11 +438,18 @@ func (h *Handler) handleCreateClient(w http.ResponseWriter, r *http.Request, adm
 	// or the first Guardian sync would push a managed-less config and strip the
 	// client's provisioning (wgProvisioned) right after enrollment.
 	if managed := h.managedTurn(clientID, name, tokenBytes, vkTurnEndpoint); managed != nil {
-		seedConfig.Turn = managed
+		// Профиль пересобирается под этого клиента, но настройки поведения из
+		// донорского конфига должны доехать: клиент, созданный из другого
+		// клиента, поднимается на той же рабочей схеме, а не на дефолтах
+		// приложения. Идентичность (endpoint, пул ссылок, профили) остаётся своя.
+		seedConfig.Turn = carryTurnBehaviour(seedConfig.Turn, managed)
 		markVkTurnBackend(seedConfig)
 		// Stored config is the WS source of truth: keep the full VK-links pool so
 		// config-on-connect pushes the rest to the device.
 		h.applyAdminVKLinks(seedConfig.Turn, admin.ID, 0)
+		// Плоский блок и config активного профиля должны описывать одно и то же
+		// поведение, иначе первая же выгрузка на устройство разъедется с панелью.
+		syncTurnProfileProjection(seedConfig.Turn)
 	}
 	configBytes, err := proto.Marshal(seedConfig)
 	if err != nil {
@@ -511,6 +518,7 @@ func (h *Handler) resolveSeedConfig(req createClientRequest, admin storage.Admin
 			return nil, errors.New("seed client config corrupted")
 		}
 		out.Guardian = nil
+		stampSeedType(out)
 		return out, nil
 	}
 	if link := strings.TrimSpace(req.SeedFromLink); link != "" {
@@ -519,9 +527,27 @@ func (h *Handler) resolveSeedConfig(req createClientRequest, admin storage.Admin
 			return nil, errors.New("invalid link (expected wingsv:// or vless://)")
 		}
 		out.Guardian = nil
+		stampSeedType(out)
 		return out, nil
 	}
 	return nil, nil
+}
+
+// stampSeedType ставит сохранённому конфигугу CONFIG_TYPE_ALL вместо типа,
+// привезённого из источника.
+//
+// Тип у конфига не настройка, а признак того, ЧЕМ этот конфиг является: у
+// vless-ссылки он CONFIG_TYPE_XRAY, и он же застревал в сохранённом конфиге
+// навсегда - путь записи cfg.Type не трогает, а configpatch приводит тип к
+// сохранённому. Клиент при этом докладывает ALL, и бейдж "ожидает применения"
+// горел бы вечно на поле, которое нельзя изменить из панели. ALL честно
+// означает "полная картина"; конкретный тип остаётся на самой ссылке, где он и
+// нужен.
+func stampSeedType(cfg *wingsvpb.Config) {
+	if cfg == nil {
+		return
+	}
+	cfg.Type = wingsvpb.ConfigType_CONFIG_TYPE_ALL
 }
 
 // buildClientLink builds a client's wingsv:// enrollment link. remoteControl ON
@@ -609,6 +635,256 @@ func (h *Handler) applyAdminVKLinks(turn *wingsvpb.Turn, adminID int64, max int)
 		merged = merged[:max]
 	}
 	turn.Links = merged
+	syncPrimaryLinkToPool(turn)
+}
+
+// syncPrimaryLinkToPool приводит turn.Link в согласие с пулом.
+//
+// Устройство берёт основную ссылку из головы пула, поэтому оставшаяся в turn.Link
+// ссылка, которой в пуле уже нет, расходится с links[0] навсегда: панель показывает
+// старую, устройство докладывает новую, и часик на ссылке висит вечно. Синхронизируем
+// только осиротевшую. Явно выбранную админом ссылку, которая в пуле есть, не трогаем.
+func syncPrimaryLinkToPool(turn *wingsvpb.Turn) {
+	if turn == nil || turn.Link == "" || len(turn.Links) == 0 {
+		return
+	}
+	if !containsString(turn.Links, turn.Link) {
+		turn.Link = turn.Links[0]
+	}
+}
+
+// containsString reports whether list holds exactly value.
+func containsString(list []string, value string) bool {
+	for _, v := range list {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+
+// carryTurnBehaviour переносит в управляемый профиль настройки поведения VK TURN
+// из донорского конфига.
+//
+// Управляемый профиль строится с нуля - свой токен, свой endpoint, свой id, - и
+// раньше он затирал Turn целиком. Из-за этого клиент, созданный из другого
+// клиента, поднимался на дефолтах приложения и выглядел так, будто заданная
+// конфигурация вообще не приехала.
+//
+// Класс каждого поля - не наше решение, а устройства: VkTurnProfileStore читает
+// их по-разному, и панель обязана повторять это разделение, иначе панель и
+// устройство вечно спорят о полях, которых устройство даже не читает из профиля.
+//
+// Глобальные настройки приложения - threads, creds_group_size, session_mode,
+// browser_fingerprint. Устройство берёт их из плоских ключей (readFlatProfile)
+// и никогда из config'а профиля: applyProfileToPrefs их специально не
+// проецирует, чтобы переключение профиля не сбрасывало то, что юзер выставил
+// глобально. Поэтому они живут только в плоском блоке. Копия такого значения
+// внутри профиля - мёртвый груз: устройство её не читает, но панель видит её
+// как рассинхрон против докладываемого значения и рисует вечный часик.
+//
+// Проецируемые настройки - use_udp, no_obfuscation, captcha, runtime_mode,
+// user_dns, wrap. Здесь профиль источник истины: applyProfileToPrefs при
+// переключении пишет их в плоские ключи. Значит, значение едет и в config
+// профиля (что записано), и в плоский блок (что применится) - иначе устройство
+// раскатает профиль обратно в дефолты.
+//
+// Ничего из того, что указывает на ЭТОГО клиента: endpoint, локальный порт,
+// host/override, пул ссылок, список профилей, wrap_key и title остаются его
+// собственными.
+func carryTurnBehaviour(donor, managed *wingsvpb.Turn) *wingsvpb.Turn {
+	if managed == nil {
+		return donor
+	}
+	if donor == nil {
+		return managed
+	}
+	// Значения, а не общие указатели: донорский конфиг может переиспользоваться,
+	// и делить с ним память под будущую правку - источник тихих сюрпризов.
+	// Глобальные: плоский блок и только он.
+	managed.Threads = copyUint32Ptr(donor.Threads)
+	managed.CredsGroupSize = copyUint32Ptr(donor.CredsGroupSize)
+	if fingerprint := strings.TrimSpace(donor.BrowserFingerprint); fingerprint != "" {
+		managed.BrowserFingerprint = fingerprint
+	}
+	// Сессионный режим управляемому профилю задаёт provisioning (MUX), и донор
+	// его не должен перебивать, пока тот не выставлен явно.
+	if managed.SessionMode == wingsvpb.TurnSessionMode_TURN_SESSION_MODE_UNSPECIFIED {
+		managed.SessionMode = donor.SessionMode
+	}
+	// Проецируемые: и в профиль, и в плоский блок.
+	carryProjectedTurnSettings(donor, managed)
+	if inner := managedProfileConfig(managed); inner != nil {
+		carryProjectedTurnSettings(donor, inner)
+		// Глобальные значения внутри профиля не хранятся вовсе.
+		inner.Threads = nil
+		inner.CredsGroupSize = nil
+	}
+	// dns_mode живёт прямо на профиле, а не в его config'е, и проецируется
+	// устройством так же, как остальные настройки поведения.
+	if src := activeTurnProfile(donor); src != nil {
+		if dst := activeTurnProfile(managed); dst != nil && strings.TrimSpace(src.DnsMode) != "" {
+			dst.DnsMode = src.DnsMode
+		}
+	}
+	// Плоский tunnel_mode описывает, какой транспорт сейчас выбран, то есть
+	// следует из активного профиля. Копировать его у донора нельзя: у управляемого
+	// профиля транспорт задаёт provisioning, и донорский AWG увёл бы плоский блок
+	// в сторону от wg-профиля, который клиент и так применяет.
+	if p := activeTurnProfile(managed); p != nil {
+		managed.TunnelMode = tunnelModeForTransportKind(p.TransportKind)
+	}
+	return managed
+}
+
+// carryProjectedTurnSettings копирует проецируемые настройки поведения - те, что
+// устройство пишет в плоские ключи при применении профиля. Глобальные поля
+// (threads, creds_group_size, session_mode, browser_fingerprint) сюда не входят.
+func carryProjectedTurnSettings(from, to *wingsvpb.Turn) {
+	to.UseUdp = copyBoolPtr(from.UseUdp)
+	to.NoObfuscation = copyBoolPtr(from.NoObfuscation)
+	to.ManualCaptcha = copyBoolPtr(from.ManualCaptcha)
+	to.RestartOnNetworkChange = copyBoolPtr(from.RestartOnNetworkChange)
+	to.CaptchaAutoSolver = from.CaptchaAutoSolver
+	to.RuntimeMode = from.RuntimeMode
+	to.WrapMode = from.WrapMode
+	to.WrapKeyDelivery = from.WrapKeyDelivery
+	to.UserDns = append([]string(nil), from.UserDns...)
+	to.WrapCiphers = append([]wingsvpb.WrapCipher(nil), from.WrapCiphers...)
+}
+
+// syncTurnProfileProjection приводит плоский блок и config активного профиля к
+// одному значению, повторяя двустороннюю синхронизацию устройства: плоские
+// ключи - рабочая копия (updateActiveFromFlatPrefs собирает из них профиль),
+// applyActiveToPrefs проецирует профиль обратно.
+//
+// Без этого панель хранит два независимых места для одного значения, и они
+// расходятся: устройство докладывает проекцию активного профиля, панель
+// показывает своё, и часик висит вечно.
+//
+// Плоский блок - основная поверхность редактирования в панели, поэтому при
+// конфликте выигрывает он; профиль дополняется только тем, что задано явно, и
+// никогда не затирает явно заданное значение плоского блока. Глобальные поля
+// из config'ов профилей вычищаются: устройство их оттуда не читает.
+func syncTurnProfileProjection(turn *wingsvpb.Turn) {
+	if turn == nil {
+		return
+	}
+	for _, profile := range turn.Profiles {
+		if profile == nil || profile.Config == nil {
+			continue
+		}
+		profile.Config.Threads = nil
+		profile.Config.CredsGroupSize = nil
+	}
+	active := activeTurnProfile(turn)
+	if active == nil || active.Config == nil {
+		return
+	}
+	flat, inner := turn, active.Config
+	if flat.UseUdp != nil {
+		inner.UseUdp = copyBoolPtr(flat.UseUdp)
+	} else if inner.UseUdp != nil {
+		flat.UseUdp = copyBoolPtr(inner.UseUdp)
+	}
+	if flat.NoObfuscation != nil {
+		inner.NoObfuscation = copyBoolPtr(flat.NoObfuscation)
+	} else if inner.NoObfuscation != nil {
+		flat.NoObfuscation = copyBoolPtr(inner.NoObfuscation)
+	}
+	if flat.ManualCaptcha != nil {
+		inner.ManualCaptcha = copyBoolPtr(flat.ManualCaptcha)
+	} else if inner.ManualCaptcha != nil {
+		flat.ManualCaptcha = copyBoolPtr(inner.ManualCaptcha)
+	}
+	if flat.RestartOnNetworkChange != nil {
+		inner.RestartOnNetworkChange = copyBoolPtr(flat.RestartOnNetworkChange)
+	} else if inner.RestartOnNetworkChange != nil {
+		flat.RestartOnNetworkChange = copyBoolPtr(inner.RestartOnNetworkChange)
+	}
+	if value := strings.TrimSpace(flat.CaptchaAutoSolver); value != "" {
+		inner.CaptchaAutoSolver = value
+	} else if inner.CaptchaAutoSolver != "" {
+		flat.CaptchaAutoSolver = inner.CaptchaAutoSolver
+	}
+	if flat.RuntimeMode != wingsvpb.ProxyRuntimeMode_PROXY_RUNTIME_MODE_UNSPECIFIED {
+		inner.RuntimeMode = flat.RuntimeMode
+	} else if inner.RuntimeMode != wingsvpb.ProxyRuntimeMode_PROXY_RUNTIME_MODE_UNSPECIFIED {
+		flat.RuntimeMode = inner.RuntimeMode
+	}
+	if flat.WrapMode != wingsvpb.WrapMode_WRAP_MODE_UNSPECIFIED {
+		inner.WrapMode = flat.WrapMode
+	} else if inner.WrapMode != wingsvpb.WrapMode_WRAP_MODE_UNSPECIFIED {
+		flat.WrapMode = inner.WrapMode
+	}
+	if flat.WrapKeyDelivery != wingsvpb.WrapKeyDelivery_WRAP_KEY_DELIVERY_UNSPECIFIED {
+		inner.WrapKeyDelivery = flat.WrapKeyDelivery
+	} else if inner.WrapKeyDelivery != wingsvpb.WrapKeyDelivery_WRAP_KEY_DELIVERY_UNSPECIFIED {
+		flat.WrapKeyDelivery = inner.WrapKeyDelivery
+	}
+	if len(flat.UserDns) > 0 {
+		inner.UserDns = append([]string(nil), flat.UserDns...)
+	} else if len(inner.UserDns) > 0 {
+		flat.UserDns = append([]string(nil), inner.UserDns...)
+	}
+	if len(flat.WrapCiphers) > 0 {
+		inner.WrapCiphers = append([]wingsvpb.WrapCipher(nil), flat.WrapCiphers...)
+	} else if len(inner.WrapCiphers) > 0 {
+		flat.WrapCiphers = append([]wingsvpb.WrapCipher(nil), inner.WrapCiphers...)
+	}
+}
+
+// activeTurnProfile returns the profile the flat block is projected from: the one
+// named by active_profile_id, or nil when there is none to project.
+func activeTurnProfile(turn *wingsvpb.Turn) *wingsvpb.TurnProfile {
+	if turn == nil {
+		return nil
+	}
+	for _, profile := range turn.Profiles {
+		if profile != nil && profile.Id == turn.ActiveProfileId {
+			return profile
+		}
+	}
+	return nil
+}
+
+// tunnelModeForTransportKind maps a profile transport kind ("wg" / "awg") onto the
+// flat tunnel_mode the device reads for the currently selected sub-backend.
+func tunnelModeForTransportKind(kind string) wingsvpb.TunnelMode {
+	if strings.EqualFold(strings.TrimSpace(kind), "awg") {
+		return wingsvpb.TunnelMode_TUNNEL_MODE_AMNEZIAWG
+	}
+	return wingsvpb.TunnelMode_TUNNEL_MODE_WIREGUARD
+}
+
+func copyBoolPtr(src *bool) *bool {
+	if src == nil {
+		return nil
+	}
+	v := *src
+	return &v
+}
+
+func copyUint32Ptr(src *uint32) *uint32 {
+	if src == nil {
+		return nil
+	}
+	v := *src
+	return &v
+}
+
+// managedProfileConfig returns the inner config of the panel-managed profile, or
+// nil when the managed profile carries none.
+func managedProfileConfig(turn *wingsvpb.Turn) *wingsvpb.Turn {
+	if turn == nil {
+		return nil
+	}
+	for _, p := range turn.Profiles {
+		if isManagedProfile(p) && p.Config != nil {
+			return p.Config
+		}
+	}
+	return nil
 }
 
 // hasManagedTurnProfile reports whether turn explicitly carries a panel-managed
@@ -1298,6 +1574,15 @@ func (h *Handler) respondPushClientConfig(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	// Путь сохранения тоже должен чинить осиротевшую основную ссылку: у клиента,
+	// созданного до этого, она в пуле уже не лежит, и без синхронизации часик на
+	// ней не погаснет никогда. Сам пул здесь не трогаем - он обновляется при
+	// сборке ссылки, и подмешивать его в каждое сохранение не просил никто.
+	syncPrimaryLinkToPool(parsed.Turn)
+	// Плоский блок и config активного профиля - два места для одних и тех же
+	// настроек поведения. Устройство читает их оба и проецирует одно в другое, так
+	// что расхождение здесь висело бы часиком до следующего ручного вмешательства.
+	syncTurnProfileProjection(parsed.Turn)
 	bytesProto, err := proto.Marshal(parsed)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
