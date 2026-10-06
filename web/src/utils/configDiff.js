@@ -33,7 +33,90 @@ export function sameValue(a, b) {
   if (typeof a === 'object' && typeof b === 'object' && a && b) {
     return stableJson(a) === stableJson(b);
   }
-  return false;
+  return sameEnumName(a, b);
+}
+
+// Значения, которые устройство заполняет само при инициализации. Панель за них не
+// отвечает: устройство подставит своё сразу после пуша, и сравнение сохранённого
+// конфига с тем, что вернуло устройство, разойдётся навсегда - часик будет висеть
+// при каждом обновлении и ничего не будет значить. Ключи названы по имени, а не
+// по пути, потому что список профилей сравнивается целиком, а не по полям;
+// вложенные поля с тем же именем (xray.settings.localProxyUsername и подобные)
+// под правило не попадают.
+const DEVICE_OWNED_KEYS = new Set([
+  'type',
+  'browserFingerprint',
+  'vkTurnEndpoint',
+  'proxyUsername',
+  'proxyPassword',
+  'proxyAuthEnabled',
+]);
+
+// То же самое по путям - для полей верхнего уровня, которые панель сравнивает
+// напрямую, а не внутри разобранного объекта.
+const DEVICE_OWNED_PATHS = new Set(['type']);
+
+function stripDeviceOwned(value) {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map(stripDeviceOwned);
+  const out = {};
+  for (const key of Object.keys(value).sort()) {
+    if (DEVICE_OWNED_KEYS.has(key)) continue;
+    out[key] = stripDeviceOwned(value[key]);
+  }
+  return out;
+}
+
+// Сравнение для отметок "ожидает применения". Отличается от sameValue только
+// тем, что не считает разницей значения, которыми владеет устройство.
+// buildPatch продолжает пользоваться sameValue: правка админа должна доезжать
+// и когда он меняет как раз такое поле.
+export function sameAppliedValue(a, b) {
+  if (a === b) return true;
+  if (isEmpty(a) && isEmpty(b)) return true;
+  if (typeof a === 'object' && typeof b === 'object' && a && b) {
+    return stableJson(stripDeviceOwned(a)) === stableJson(stripDeviceOwned(b));
+  }
+  return sameEnumName(a, b);
+}
+
+// Панель отвечает только за значения, которые реально заданы. В proto3 нет
+// presence, поэтому пустое desired неотличимо от "не задано" и читается как
+// "панель молчит". Так админский переключатель, который он снял, не даёт вечного
+// часика, а push всё равно довозит правку: buildPatch умеет влять поле,
+// которого в сохранённом конфиге ещё нет.
+export function panelClaims(desired, path) {
+  if (DEVICE_OWNED_PATHS.has(path)) return false;
+  // Скалярные поля приходят сю путём, а не разобранным объектом, поэтому имя
+  // последнего сегмента проверяем отдельно. Вложенные имена вида
+  // xray.settings.localProxyUsername под правило не попадают - совпадение точное.
+  const parts = path.split('.');
+  if (DEVICE_OWNED_KEYS.has(parts[parts.length - 1])) return false;
+  return !isEmpty(readPath(desired, path));
+}
+
+// Один источник правды для маркера поля и бейджа секции: они обязаны считать
+// одно и то же множество полей, иначе рядом будут "применено" и часик.
+export function pendingAt(desired, reported, path) {
+  if (!desired || !reported) return null;
+  if (!panelClaims(desired, path)) return null;
+  const d = readPath(desired, path);
+  const r = readPath(reported, path);
+  if (sameAppliedValue(d, r)) return null;
+  return { text: describeValue(r, d) };
+}
+
+// A proto enum travels as CONSTANT_NAME, but the same setting can reach the panel
+// under its bare suffix ("SYSTEM" beside "THEME_MODE_SYSTEM"), and the two must not
+// read as a pending change. Only all-caps underscore tokens match this way, so
+// case-sensitive data such as a VK link or a package name stays untouched.
+function sameEnumName(a, b) {
+  if (!isEnumToken(a) || !isEnumToken(b)) return false;
+  return a === b || a.endsWith('_' + b) || b.endsWith('_' + a);
+}
+
+function isEnumToken(value) {
+  return typeof value === 'string' && /^[A-Z][A-Z0-9_]*$/.test(value);
 }
 
 // Key order is not meaningful in the JSON we get back, so sort before comparing.
@@ -75,10 +158,13 @@ function leafPaths(node, prefix = []) {
 // True when every field the panel specified already has that value on the
 // device. Deliberately a subset check, not an equality one: the device reports
 // its whole config, including settings the panel never manages, so demanding
-// equality would leave the badge stuck on "pending" forever.
+// equality would leave the badge stuck on "pending" forever. The subset is also
+// narrowed to values the panel actually owns - see panelClaims.
 export function desiredApplied(desired, reported) {
   if (!desired || !reported) return false;
-  return leafPaths(desired).every((path) => sameValue(readPath(desired, path), readPath(reported, path)));
+  return leafPaths(desired)
+    .filter((path) => panelClaims(desired, path))
+    .every((path) => sameAppliedValue(readPath(desired, path), readPath(reported, path)));
 }
 
 // Собирает патч: только те ветки, которые правда разъехались с сохранённым
