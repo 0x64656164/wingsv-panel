@@ -916,9 +916,7 @@ const managementPillValue = computed({
   get: () => (remoteControl.value ? 'full' : 'config'),
   set: (v) => saveManagement(v === 'full'),
 });
-const visibleTabs = computed(() =>
-  isConfigOnly.value ? tabs.filter((t) => configOnlyTabIds.has(t.id)) : tabs,
-);
+const visibleTabs = computed(() => (isConfigOnly.value ? tabs.filter((t) => configOnlyTabIds.has(t.id)) : tabs));
 const queueVkLinkCount = ref(1);
 const busyCmd = ref(false);
 const busyDelete = ref(false);
