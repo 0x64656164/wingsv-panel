@@ -828,10 +828,16 @@ const logStreams = [
 ];
 
 const validTabIds = tabs.map((t) => t.id);
+// What a config-only client is still allowed to look at: the QR / token surface,
+// VK TURN provisioning, and the two tabs that describe what the device actually
+// runs. Profiles and per-app routing are kept because both sections already live
+// in desired_config - cloning a client copies them - so hiding the tabs left the
+// admin unable to see data the panel was already holding.
+const configOnlyTabIds = new Set(['config', 'vk_turn', 'profiles', 'app_routing']);
 const activeTab = computed(() => {
   const want = validTabIds.includes(props.tab) ? props.tab : 'config';
   // In config-only mode a stale deep link to a hidden tab lands on Конфигурация.
-  if (isConfigOnly.value && want !== 'config' && want !== 'vk_turn') return 'config';
+  if (isConfigOnly.value && !configOnlyTabIds.has(want)) return 'config';
   return want;
 });
 function setActiveTab(tabId) {
@@ -910,10 +916,8 @@ const managementPillValue = computed({
   get: () => (remoteControl.value ? 'full' : 'config'),
   set: (v) => saveManagement(v === 'full'),
 });
-// Config-only clients keep just the Конфигурация (QR + token rotation) and VK TURN
-// (provisioning) tabs; the panel manages nothing else on them.
 const visibleTabs = computed(() =>
-  isConfigOnly.value ? tabs.filter((t) => t.id === 'config' || t.id === 'vk_turn') : tabs,
+  isConfigOnly.value ? tabs.filter((t) => configOnlyTabIds.has(t.id)) : tabs,
 );
 const queueVkLinkCount = ref(1);
 const busyCmd = ref(false);
@@ -1128,6 +1132,7 @@ async function loadDetail() {
       remoteControl.value = detail.value.client?.remote_control !== false;
       remoteControlSeeded.value = true;
     }
+    seedProfileBackend();
     // Lazy-load the wingsv:// link so the QR card on Конфигурация has data
     // without requiring the admin to click "Показать ссылку" first.
     if (!wingsvLink.value) {
@@ -1826,6 +1831,20 @@ const profileBackendOptions = [
   { value: 'xray', label: 'Xray' },
 ];
 const isXrayProfiles = computed(() => profileBackend.value === 'xray');
+// The unified Профили tab lists one library per backend, so opening it on 'xray'
+// showed an empty list for a VK TURN client while its real profiles sat one pill
+// away. Seed the pill from the client's own backend; VK TURN is checked first
+// because its AWG/WG transport variants carry the name too.
+const profileBackendSeeded = ref(false);
+function seedProfileBackend() {
+  if (profileBackendSeeded.value) return;
+  const type = String(detail.value?.client?.backend_type || '').toUpperCase();
+  if (type.includes('VK_TURN')) profileBackend.value = 'turn';
+  else if (type.includes('AMNEZIAWG')) profileBackend.value = 'awg';
+  else if (type.includes('WIREGUARD')) profileBackend.value = 'wg';
+  else if (type.includes('XRAY')) profileBackend.value = 'xray';
+  profileBackendSeeded.value = true;
+}
 const currentProfiles = computed(() => formValue.value?.[profileBackend.value]?.profiles || []);
 const currentActiveProfileId = computed(() => formValue.value?.[profileBackend.value]?.activeProfileId || '');
 const displayProfiles = computed(() => (isXrayProfiles.value ? paginatedXrayProfiles.value : currentProfiles.value));
@@ -2237,6 +2256,13 @@ watch(id, () => {
   detail.value = null;
   followClient.value = true;
   configDraftSeeded.value = false;
+  // Every *Seeded latch means "read this once from the loaded client", so a
+  // client switch has to re-arm all of them. Only configDraftSeeded was being
+  // cleared, which leaked the previous client's provision toggle, remote-control
+  // toggle and Profiles backend pill into the next client.
+  provisionSeeded.value = false;
+  remoteControlSeeded.value = false;
+  profileBackendSeeded.value = false;
   loadDetail();
   loadInstalledApps();
 });

@@ -944,7 +944,7 @@ import OneuiSelect from '@/components/controls/OneuiSelect.vue';
 import FormSection from '@/components/domain/FormSection.vue';
 import ConfigPendingMark from '@/components/domain/ConfigPendingMark.vue';
 import SamsungLoader from '@/components/layout/SamsungLoader.vue';
-import { describeValue, readPath, sameValue } from '@/utils/configDiff';
+import { pendingAt } from '@/utils/configDiff';
 
 const props = defineProps({
   modelValue: { type: Object, required: true },
@@ -1119,13 +1119,7 @@ const byedpiDesyncOptions = [
   { value: 'BYEDPI_DESYNC_METHOD_DISOOB', label: 'DisOOB' },
 ];
 
-provide('configPending', (path) => {
-  if (!props.reportedValue || !props.desiredValue) return null;
-  const desired = readPath(props.desiredValue, path);
-  const reported = readPath(props.reportedValue, path);
-  if (sameValue(desired, reported)) return null;
-  return { text: describeValue(reported, desired) };
-});
+provide('configPending', (path) => pendingAt(props.desiredValue, props.reportedValue, path));
 
 const ap = computed(() => props.modelValue.appPreferences || {});
 const turn = computed(() => props.modelValue.turn || {});
