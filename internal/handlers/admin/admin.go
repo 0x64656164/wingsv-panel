@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"v.wingsnet.org/internal/accountsession"
 	"v.wingsnet.org/internal/auth"
@@ -182,10 +183,16 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/admin/federation/enroll-token", h.requirePanel(h.handleFederationEnrollToken))
 	mux.HandleFunc("/api/admin/federation/live", h.requirePanel(h.handleFederationLive))
 	mux.HandleFunc("/api/admin/donations", h.requireAuth(h.handleDonations))
-	mux.HandleFunc("/api/admin/donations/claim", h.requireAuth(h.handleClaimDonation))
-	mux.HandleFunc("/api/admin/federation/payouts", h.requirePanel(h.handlePayoutStatement))
-	mux.HandleFunc("/api/admin/federation/payouts/address", h.requirePanel(h.handlePayoutAddress))
-	mux.HandleFunc("/api/admin/federation/payouts/stake/release", h.requirePanel(h.handleReleaseStake))
+	mux.HandleFunc("/api/admin/donations/claim", h.requireAuth(h.requireCrypto(h.handleClaimDonation)))
+	mux.HandleFunc("/api/admin/federation/payouts", h.requirePanel(h.requireCrypto(h.handlePayoutStatement)))
+	mux.HandleFunc(
+		"/api/admin/federation/payouts/address",
+		h.requirePanel(h.requireCrypto(h.handlePayoutAddress)),
+	)
+	mux.HandleFunc(
+		"/api/admin/federation/payouts/stake/release",
+		h.requirePanel(h.requireCrypto(h.handleReleaseStake)),
+	)
 	mux.HandleFunc("/api/admin/federation/nodes/", h.requirePanel(h.handleFederationNodeState))
 	mux.HandleFunc("/api/admin/master/config", h.requirePanel(h.handleMasterConfig))
 	mux.HandleFunc("/api/admin/master/config/apply", h.requirePanel(h.handleMasterConfigApply))
@@ -300,9 +307,10 @@ func (h *Handler) enrollAccount(ctx context.Context, admin storage.Admin, passwo
 	if !h.session.Enabled() || password == "" {
 		return
 	}
-	call, cancel := context.WithTimeout(ctx, accountTimeout)
-	defer cancel()
-	subject, err := h.session.CreateHuman(call, humanFor(admin, h.accountDomain(), password))
+	// Своё время жизни, не от запроса: браузер мог уже уйти с ответом, а учётку
+	// всё равно надо завести - иначе человека встретит экран переезда и просьба
+	// ввести пароль второй раз
+	subject, err := h.createAccountWithRetry(admin, password)
 	if err != nil {
 		log.Printf("register: %s got no account: %v", admin.Username, err)
 		return
@@ -310,6 +318,27 @@ func (h *Handler) enrollAccount(ctx context.Context, admin storage.Admin, passwo
 	if err := h.store.LinkAccount(admin.ID, subject, admin.Username); err != nil {
 		log.Printf("register: the account of %s was not linked: %v", admin.Username, err)
 	}
+}
+
+// createAccountWithRetry зовёт провайдера и, когда тот не уложился в срок,
+// заходит второй раз: отказ по таймауту тут не окончательный, а учётка нужна
+// сразу, иначе регистрация разваливается на два шага
+func (h *Handler) createAccountWithRetry(admin storage.Admin, password string) (string, error) {
+	who := humanFor(admin, h.accountDomain(), password)
+	var lastErr error
+	for attempt := range accountEnrollAttempts {
+		if attempt > 0 {
+			time.Sleep(accountEnrollRetryDelay)
+		}
+		call, cancel := context.WithTimeout(context.Background(), accountEnrollTimeout)
+		subject, err := h.session.CreateHuman(call, who)
+		cancel()
+		if err == nil {
+			return subject, nil
+		}
+		lastErr = err
+	}
+	return "", lastErr
 }
 
 func (h *Handler) handleRegistrationStatus(w http.ResponseWriter, r *http.Request) {
@@ -461,7 +490,10 @@ func (h *Handler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	mime, data, _, err := h.store.GetAdminAvatar(id)
+	// ?s=128 - какой размер нужен. Список аккаунтов тянет по картинке на строку,
+	// и гонять туда полноразмерные бессмысленно
+	size, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("s")))
+	mime, data, _, err := h.store.GetAdminAvatarSized(id, size)
 	if err != nil || len(data) == 0 {
 		// Своей картинки нет - отдаём кружок с буквой имени. На 404 каждый клиент
 		// лепил бы свою затычку, а их дохуя и все разные
@@ -474,6 +506,11 @@ func (h *Handler) handleAvatar(w http.ResponseWriter, r *http.Request) {
 		if drawErr != nil {
 			http.NotFound(w, r)
 			return
+		}
+		if size > 0 {
+			if scaled, scaleErr := avatarpic.Resize(generated, avatarpic.NearestSize(size)); scaleErr == nil {
+				generated = scaled
+			}
 		}
 		w.Header().Set("Content-Type", "image/png")
 		w.Header().Set("Cache-Control", "private, max-age=86400")
@@ -569,6 +606,28 @@ func (h *Handler) requireAuth(next authedHandler) http.HandlerFunc {
 // requirePanel пускает только тех, кому открыта админ-панель. Аккаунт без неё -
 // обычный участник: у него есть свой доступ к VPN и свой кабинет, но чужими
 // нодами и клиентами он не распоряжается
+// cryptoOn сообщает, включена ли денежная часть. По умолчанию выключена:
+// основной режим - без выплат, деньги включает владелец вручную
+func (h *Handler) cryptoOn() bool {
+	value, err := h.store.GetPlatformSetting(storage.SettingCryptoEnabled, "false")
+	if err != nil {
+		return false
+	}
+	return value == "true"
+}
+
+// requireCrypto закрывает ручки, которые что-то считают или двигают деньги.
+// Адрес на разработку это не трогает: он отдаётся и при выключенной крипте
+func (h *Handler) requireCrypto(next authedHandler) authedHandler {
+	return func(w http.ResponseWriter, r *http.Request, admin storage.Admin) {
+		if !h.cryptoOn() {
+			writeError(w, http.StatusForbidden, "денежная часть выключена")
+			return
+		}
+		next(w, r, admin)
+	}
+}
+
 func (h *Handler) requirePanel(next authedHandler) http.HandlerFunc {
 	// Сначала переезд, потом всё остальное: панель перестаёт быть местом, где
 	// живут пароли, и свой пароль остаётся дверью только до заведения учётки

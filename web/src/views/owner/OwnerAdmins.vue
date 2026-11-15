@@ -100,8 +100,8 @@
         @update:model-value="setLinkFormat"
       />
       <p class="admin-muted mt-2">
-        Brotli короче на четверть - QR получается крупнее и читается быстрее. Сборки приложения, вышедшие до его
-        появления, такую ссылку не прочитают: для них есть старый формат.
+        Основной формат не ставит в ссылку подчёркивания, которые мессенджеры принимают за разметку. Сборки, вышедшие до
+        него, читают прежний алфавит, а совсем старые - deflate.
       </p>
     </div>
 
@@ -115,6 +115,25 @@
       </span>
     </div>
 
+    <h3 class="admin-section-subtitle mt-6">Выплаты и заносы</h3>
+    <div class="keyval mt-2">
+      <span class="keyval-label">
+        Считать выплаты донорам и принимать заносы. Выключено - остаётся только адрес на разработку
+      </span>
+      <span class="keyval-value">
+        <OneuiSwitch :model-value="cryptoEnabled" @update:model-value="setCryptoEnabled" />
+      </span>
+    </div>
+
+    <div class="keyval mt-2">
+      <span class="keyval-label">
+        Пускать в федерацию без приглашения. Выключено - корнем дерева встаёт только донор с сервером
+      </span>
+      <span class="keyval-value">
+        <OneuiSwitch :model-value="federationOpenEntry" @update:model-value="setFederationOpenEntry" />
+      </span>
+    </div>
+
     <h3 class="admin-section-subtitle mt-6">Админ-панель участникам</h3>
     <div class="keyval mt-2">
       <span class="keyval-label">
@@ -125,7 +144,7 @@
       </span>
     </div>
 
-    <div v-if="registrationState.mode === 'invite'" class="mt-4">
+    <div v-if="registrationState.mode !== 'closed'" class="mt-4">
       <div class="actions-row">
         <SamsungButton variant="secondary" @click="onCreateInvite">
           <template #icon><Plus class="button-icon" aria-hidden="true" /></template>
@@ -258,9 +277,12 @@ const invites = ref([]);
 const loadError = ref('');
 const allowAdminGRPC = ref(false);
 const panelByRequest = ref(false);
+const federationOpenEntry = ref(false);
+const cryptoEnabled = ref(false);
 const linkFormat = ref('brotli');
 const linkFormatOptions = [
   { value: 'brotli', label: 'Brotli (основной)' },
+  { value: 'brotli_legacy', label: 'Brotli, прежний алфавит' },
   { value: 'deflate', label: 'Старый deflate' },
 ];
 const showCreate = ref(false);
@@ -448,6 +470,8 @@ async function loadSettings() {
       const body = await res.json();
       allowAdminGRPC.value = !!body.allow_admin_grpc;
       panelByRequest.value = !!body.panel_by_request;
+      federationOpenEntry.value = !!body.federation_open_entry;
+      cryptoEnabled.value = body.crypto_enabled !== false;
       linkFormat.value = body.link_format || 'brotli';
     }
   } catch {}
@@ -485,6 +509,21 @@ async function setAllowAdminGRPC(value) {
   }
 }
 
+async function setCryptoEnabled(value) {
+  try {
+    const res = await fetch('/api/owner/settings', {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ crypto_enabled: value }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    cryptoEnabled.value = value;
+  } catch (err) {
+    loadError.value = err.message;
+  }
+}
+
 async function setPanelByRequest(value) {
   try {
     const res = await fetch('/api/owner/settings', {
@@ -495,6 +534,21 @@ async function setPanelByRequest(value) {
     });
     if (!res.ok) throw new Error(await res.text());
     panelByRequest.value = value;
+  } catch (err) {
+    loadError.value = err.message;
+  }
+}
+
+async function setFederationOpenEntry(value) {
+  try {
+    const res = await fetch('/api/owner/settings', {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ federation_open_entry: value }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    federationOpenEntry.value = value;
   } catch (err) {
     loadError.value = err.message;
   }
@@ -511,7 +565,7 @@ async function setRegistrationMode(mode) {
     });
     if (!res.ok) throw new Error(await res.text());
     registrationState.value = { mode, loaded: true };
-    if (mode === 'invite') loadInvites();
+    if (mode !== 'closed') loadInvites();
   } catch (err) {
     loadError.value = err.message;
   }

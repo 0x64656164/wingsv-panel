@@ -469,6 +469,10 @@ type settingsRequest struct {
 	AllowAdminGRPC *bool  `json:"allow_admin_grpc"`
 	LinkFormat     string `json:"link_format"`
 	PanelByRequest *bool  `json:"panel_by_request"`
+	CryptoEnabled  *bool  `json:"crypto_enabled"`
+	// Снимает донорский порог со входа в дерево корнем: регистрация открытая,
+	// приглашения продолжают работать
+	FederationOpenEntry *bool `json:"federation_open_entry"`
 }
 
 func (h *Handler) settingsPayload() (map[string]any, error) {
@@ -488,11 +492,21 @@ func (h *Handler) settingsPayload() (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	crypto, err := h.store.GetPlatformSetting(storage.SettingCryptoEnabled, "false")
+	if err != nil {
+		return nil, err
+	}
+	openEntry, err := h.store.GetPlatformSetting(storage.SettingFederationOpenEntry, "false")
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
-		"registration_mode": mode,
-		"allow_admin_grpc":  allowGRPC == "true",
-		"link_format":       linkFormat,
-		"panel_by_request":  byRequest == "true",
+		"registration_mode":     mode,
+		"allow_admin_grpc":      allowGRPC == "true",
+		"link_format":           linkFormat,
+		"panel_by_request":      byRequest == "true",
+		"federation_open_entry": openEntry == "true",
+		"crypto_enabled":        crypto == "true",
 	}, nil
 }
 
@@ -528,7 +542,9 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request, owner s
 			})
 		}
 		if format := strings.TrimSpace(req.LinkFormat); format != "" {
-			if format != storage.LinkFormatBrotli && format != storage.LinkFormatDeflate {
+			if format != storage.LinkFormatBrotli &&
+				format != storage.LinkFormatBrotliLegacy &&
+				format != storage.LinkFormatDeflate {
 				writeError(w, http.StatusBadRequest, "unknown link_format")
 				return
 			}
@@ -567,6 +583,34 @@ func (h *Handler) handleSettings(w http.ResponseWriter, r *http.Request, owner s
 			_ = h.store.AppendAudit(storage.AuditEntry{
 				ActorAdminID: owner.ID, ActorUsername: owner.Username,
 				Action: "owner.panel_by_request_changed", Message: value, IP: clientIP(r),
+			})
+		}
+		if req.FederationOpenEntry != nil {
+			value := "false"
+			if *req.FederationOpenEntry {
+				value = "true"
+			}
+			if err := h.store.SetPlatformSetting(storage.SettingFederationOpenEntry, value); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			_ = h.store.AppendAudit(storage.AuditEntry{
+				ActorAdminID: owner.ID, ActorUsername: owner.Username,
+				Action: "owner.federation_open_entry_changed", Message: value, IP: clientIP(r),
+			})
+		}
+		if req.CryptoEnabled != nil {
+			value := "false"
+			if *req.CryptoEnabled {
+				value = "true"
+			}
+			if err := h.store.SetPlatformSetting(storage.SettingCryptoEnabled, value); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			_ = h.store.AppendAudit(storage.AuditEntry{
+				ActorAdminID: owner.ID, ActorUsername: owner.Username,
+				Action: "owner.crypto_enabled_changed", Message: value, IP: clientIP(r),
 			})
 		}
 		payload, err := h.settingsPayload()

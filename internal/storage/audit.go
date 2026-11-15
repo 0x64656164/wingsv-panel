@@ -21,17 +21,32 @@ const (
 	// disabled: a deployment that never opted in has nothing to reason about.
 	SettingFederationEnabled = "federation_enabled"
 
+	// SettingFederationOpenEntry снимает донорский порог с того, кто входит в
+	// дерево корнем, без приглашения: регистрация в федерацию становится открытой.
+	// Сами приглашения при этом работают как раньше - они остаются способом
+	// привести своих и попасть в дерево ветвью. Выключено по умолчанию.
+	SettingFederationOpenEntry = "federation_open_entry"
+
 	// SettingPanelByRequest включает модерацию: панель тогда открывает владелец,
 	// а не сам участник. По умолчанию выключено - вести своих клиентов вправе
 	// каждый, кто уже в дереве
 	SettingPanelByRequest = "panel_by_request"
 
-	// SettingLinkFormat выбирает, чем сжимать ссылки: brotli короче на четверть,
+	// SettingCryptoEnabled гасит денежную часть: выплаты донорам, приём заносов
+	// и их разбор. Адрес на разработку остаётся виден и без неё - это просто
+	// реквизит, а не механика. Пустое значение считается включённым, чтобы уже
+	// работающая установка не растеряла выплаты на ровном месте
+	SettingCryptoEnabled = "crypto_enabled"
+
+	// SettingLinkFormat выбирает формат ссылок: brotli короче на четверть,
 	// но сборки приложения до его появления такую ссылку не прочитают
 	SettingLinkFormat = "link_format"
-	// LinkFormatBrotli и LinkFormatDeflate - значения этой настройки
-	LinkFormatBrotli  = "brotli"
-	LinkFormatDeflate = "deflate"
+	// Значения настройки. brotli - основной: сжатие brotli и алфавит без
+	// подчёркиваний. brotli_legacy - то же сжатие, но прежний алфавит, для сборок,
+	// которые brotli знают, а точку в теле ссылки ещё нет. deflate - самый старый
+	LinkFormatBrotli       = "brotli"
+	LinkFormatBrotliLegacy = "brotli_legacy"
+	LinkFormatDeflate      = "deflate"
 )
 
 type AuditEntry struct {

@@ -602,9 +602,14 @@ func (h *Handler) buildLink(cfg *wingsvpb.Config) (string, error) {
 	if h.store == nil {
 		return preview.BuildWingsLink(cfg)
 	}
-	if format, err := h.store.GetPlatformSetting(storage.SettingLinkFormat, storage.LinkFormatBrotli); err == nil &&
-		format == storage.LinkFormatDeflate {
-		return preview.BuildWingsLinkDeflate(cfg)
+	format, err := h.store.GetPlatformSetting(storage.SettingLinkFormat, storage.LinkFormatBrotli)
+	if err == nil {
+		switch format {
+		case storage.LinkFormatDeflate:
+			return preview.BuildWingsLinkDeflate(cfg)
+		case storage.LinkFormatBrotliLegacy:
+			return preview.BuildWingsLinkLegacyAlphabet(cfg)
+		}
 	}
 	return preview.BuildWingsLink(cfg)
 }
@@ -986,6 +991,21 @@ func existingManagedEndpoint(turn *wingsvpb.Turn) string {
 	return ""
 }
 
+// existingManagedConfig returns the inner Turn of a managed profile already present
+// in turn, so that a rebuild keeps what the admin set on it. Nil when there is no
+// managed profile yet, or when it carries no settings of its own.
+func existingManagedConfig(turn *wingsvpb.Turn) *wingsvpb.Turn {
+	if turn == nil {
+		return nil
+	}
+	for _, p := range turn.Profiles {
+		if isManagedProfile(p) && p.Config != nil {
+			return p.Config
+		}
+	}
+	return nil
+}
+
 // stripManagedTurnProfiles removes any panel-managed profiles from turn, keeping the
 // client's manually configured profiles untouched. Returns turn (possibly nil).
 func stripManagedTurnProfiles(turn *wingsvpb.Turn) *wingsvpb.Turn {
@@ -1025,7 +1045,18 @@ func hasProfile(profiles []*wingsvpb.TurnProfile, id string) bool {
 
 // applyManagedTurnProfile injects or replaces the panel-managed self-provisioning
 // profile in turn, preserving the client's manually configured profiles.
+//
+// Настройки самого профиля (режим WRAP, отпечаток браузера и прочее, что несёт
+// его внутренний Turn) переживают пересборку: раньше профиль собирался с нуля
+// на каждый пуш, и всё выставленное админом молча уезжало обратно к умолчаниям
+// приложения.
 func applyManagedTurnProfile(turn *wingsvpb.Turn, clientID, name string, token []byte, endpoint string) *wingsvpb.Turn {
+	inner := existingManagedConfig(turn)
+	if inner == nil {
+		// Без внутреннего конфига приложение берёт свой плоский "mainline",
+		// поэтому режим сессии проставляется явно
+		inner = &wingsvpb.Turn{SessionMode: wingsvpb.TurnSessionMode_TURN_SESSION_MODE_MUX}
+	}
 	managed := &wingsvpb.TurnProfile{
 		Id:                clientID,
 		Title:             name,
@@ -1034,10 +1065,7 @@ func applyManagedTurnProfile(turn *wingsvpb.Turn, clientID, name string, token [
 		WgProvisioned:     true,
 		ProvisionClientId: clientID,
 		ProvisionToken:    []byte(hex.EncodeToString(token)),
-		// Force the mu/v1 (mux) TURN session mode for panel-provisioned profiles.
-		// Without an inner config the app falls back to its flat "mainline" default;
-		// the inner Turn carries only the session mode, the rest stays app-default.
-		Config: &wingsvpb.Turn{SessionMode: wingsvpb.TurnSessionMode_TURN_SESSION_MODE_MUX},
+		Config:            inner,
 	}
 	if turn == nil {
 		turn = &wingsvpb.Turn{}
