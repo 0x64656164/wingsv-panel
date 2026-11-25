@@ -747,7 +747,6 @@
 </template>
 
 <script setup>
-import { buildPatch } from '@/utils/configDiff';
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import {
@@ -1105,8 +1104,8 @@ async function loadDetail() {
       syncModeDraft.value = detail.value.client.sync_mode || 'always';
       syncIntervalDraft.value = detail.value.client.periodic_interval_minutes || 30;
     }
-    // The draft is the BASE of the patch (savePatch diffs it against
-    // desired_config), so it must always hold desired_config and nothing else.
+    // The draft is the config we push verbatim, so it must always hold
+    // desired_config and nothing else.
     // Seeding it from reported_config instead made the very first push carry
     // every field the device disagrees on - overwriting panel state the admin
     // never touched, and for a managed client that mismatch always includes
@@ -1189,30 +1188,19 @@ async function saveManagement(remote) {
 const configClash = ref([]);
 
 /**
- * Шлёт ПАТЧ, а не весь конфиг.
- *
- * Целиком гонять нельзя нахуй: тогда любое сохранение объявляет тронутыми все
- * поля разом, и двое админов дерутся там, где правили разное. Патч несёт только
- * разъехавшееся, а версия говорит, из чего мы исходили.
+ * Push отправляет весь конфиг, а не только разъехавшиеся поля. Панель авторитетна
+ * для всех показанных в редакторе настроек: пустое поле должно сбросить значение
+ * на устройстве, а неизменившееся - всё равно дойти до него. Сервер сам применяет
+ * provisioning и чинит служебные поля перед отправкой.
  */
-async function savePatch(parsed, failure) {
-  const stored = detail.value?.desired_config || {};
-  const patch = buildPatch(parsed, stored);
-  const provisionUntouched =
-    provisionEnabled.value === provisionWasEnabled.value && provisionNodeId.value === provisionNodeWas.value;
-  if (Object.keys(patch).length === 0 && provisionUntouched) {
-    // Править нехуй: молча выходим, иначе плодим версии на пустом месте
-    configClash.value = [];
-    return undefined;
-  }
+async function saveConfig(parsed, failure) {
   const res = await fetch(`/api/admin/clients/${id.value}/config`, {
     method: 'PUT',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      config: patch,
-      patch: true,
-      if_config_version: Number(detail.value?.config_version || 0),
+      config: parsed,
+      patch: false,
       provision: provisionEnabled.value,
       vk_turn_node_id: provisionNodeId.value,
     }),
@@ -1244,7 +1232,10 @@ async function autoSaveProvision() {
     } catch {
       parsed = {};
     }
-    const res = await savePatch(parsed, 'Не удалось сохранить');
+    const provisionUntouched =
+      provisionEnabled.value === provisionWasEnabled.value && provisionNodeId.value === provisionNodeWas.value;
+    if (Object.keys(parsed).length === 0 && provisionUntouched) return;
+    const res = await saveConfig(parsed, 'Не удалось сохранить');
     if (res === null) return;
     await loadDetail();
   } catch (err) {
@@ -1994,7 +1985,7 @@ async function pushConfig() {
   }
   busyPush.value = true;
   try {
-    const res = await savePatch(parsed, 'Не удалось применить');
+    const res = await saveConfig(parsed, 'Не удалось применить');
     if (res === null) return;
     await loadDetail();
   } catch (err) {
