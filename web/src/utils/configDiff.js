@@ -24,18 +24,6 @@ function isEmpty(value) {
   );
 }
 
-// Proto3 JSON drops fields sitting at their default, so an absent field and an
-// explicit default mean the same thing. Treating them as equal is what keeps
-// the marker off fields nobody touched.
-export function sameValue(a, b) {
-  if (a === b) return true;
-  if (isEmpty(a) && isEmpty(b)) return true;
-  if (typeof a === 'object' && typeof b === 'object' && a && b) {
-    return stableJson(a) === stableJson(b);
-  }
-  return sameEnumName(a, b);
-}
-
 // Значения, которые устройство заполняет само при инициализации. Панель за них не
 // отвечает: устройство подставит своё сразу после пуша, и сравнение сохранённого
 // конфига с тем, что вернуло устройство, разойдётся навсегда - часик будет висеть
@@ -67,10 +55,8 @@ function stripDeviceOwned(value) {
   return out;
 }
 
-// Сравнение для отметок "ожидает применения". Отличается от sameValue только
-// тем, что не считает разницей значения, которыми владеет устройство.
-// buildPatch продолжает пользоваться sameValue: правка админа должна доезжать
-// и когда он меняет как раз такое поле.
+// Сравнение для отметок "ожидает применения". Отличается от обычного равенства
+// только тем, что не считает разницей значения, которыми владеет устройство.
 export function sameAppliedValue(a, b) {
   if (a === b) return true;
   if (isEmpty(a) && isEmpty(b)) return true;
@@ -82,9 +68,7 @@ export function sameAppliedValue(a, b) {
 
 // Панель отвечает только за значения, которые реально заданы. В proto3 нет
 // presence, поэтому пустое desired неотличимо от "не задано" и читается как
-// "панель молчит". Так админский переключатель, который он снял, не даёт вечного
-// часика, а push всё равно довозит правку: buildPatch умеет влять поле,
-// которого в сохранённом конфиге ещё нет.
+// "панель молчит": пуш всё равно довозит его целиком, а часик не залипает.
 export function panelClaims(desired, path) {
   if (DEVICE_OWNED_PATHS.has(path)) return false;
   // Скалярные поля приходят сю путём, а не разобранным объектом, поэтому имя
@@ -92,7 +76,12 @@ export function panelClaims(desired, path) {
   // xray.settings.localProxyUsername под правило не попадают - совпадение точное.
   const parts = path.split('.');
   if (DEVICE_OWNED_KEYS.has(parts[parts.length - 1])) return false;
-  return !isEmpty(readPath(desired, path));
+  const value = readPath(desired, path);
+  // UNSPECIFIED - это не значение панели, а отсутствие выбора. Клиент подставляет
+  // свой дефолт (THEME_MODE_SYSTEM, WRAP_MODE_PREFERRED и т.п.), и сравнение с ним
+  // производило вечный часик после каждого отчёта.
+  if (isUnspecifiedEnum(value)) return false;
+  return !isEmpty(value);
 }
 
 // Один источник правды для маркера поля и бейджа секции: они обязаны считать
@@ -117,6 +106,10 @@ function sameEnumName(a, b) {
 
 function isEnumToken(value) {
   return typeof value === 'string' && /^[A-Z][A-Z0-9_]*$/.test(value);
+}
+
+function isUnspecifiedEnum(value) {
+  return typeof value === 'string' && value.endsWith('_UNSPECIFIED');
 }
 
 // Key order is not meaningful in the JSON we get back, so sort before comparing.
@@ -165,47 +158,4 @@ export function desiredApplied(desired, reported) {
   return leafPaths(desired)
     .filter((path) => panelClaims(desired, path))
     .every((path) => sameAppliedValue(readPath(desired, path), readPath(reported, path)));
-}
-
-// Собирает патч: только те ветки, которые правда разъехались с сохранённым
-// конфигом. Целиком конфиг слать нельзя - тогда любое сохранение объявляет
-// тронутыми все поля разом, и двое админов дерутся на ровном месте.
-export function buildPatch(draft, stored) {
-  const patch = {};
-  collect(draft || {}, stored || {}, patch);
-  return patch;
-}
-
-function collect(draft, stored, out) {
-  for (const key of Object.keys(draft)) {
-    const next = draft[key];
-    const was = stored ? stored[key] : undefined;
-    if (sameValue(next, was)) continue;
-    // Внутрь вложенного лезем вглубь: "тронут весь раздел" - это лишний срач
-    if (isPlainObject(next) && isPlainObject(was)) {
-      const nested = {};
-      collect(next, was, nested);
-      if (Object.keys(nested).length > 0) out[key] = nested;
-      continue;
-    }
-    out[key] = next;
-  }
-  // Стёртое поле тоже правка: иначе снятая галка нихуя не доедет
-  for (const key of Object.keys(stored || {})) {
-    if (key in draft) continue;
-    if (isEmpty(stored[key])) continue;
-    out[key] = emptyLike(stored[key]);
-  }
-}
-
-function isPlainObject(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function emptyLike(value) {
-  if (Array.isArray(value)) return [];
-  if (isPlainObject(value)) return {};
-  if (typeof value === 'boolean') return false;
-  if (typeof value === 'number') return 0;
-  return '';
 }
